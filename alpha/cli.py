@@ -27,6 +27,7 @@ import os
 import signal
 import sys
 import time
+import threading
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -70,7 +71,7 @@ def _enable_cbreak_mode():
         try:
             import tty
             import termios
-            _orig_termios = termios.tcgetattr(sys.stdin)
+            _orig_termios = termios.tcgetattr(sys.stdin.fileno())
             tty.setcbreak(sys.stdin.fileno())
         except Exception:
             pass
@@ -81,7 +82,7 @@ def _restore_terminal_mode():
     if sys.platform != "win32" and _orig_termios is not None and sys.stdin.isatty():
         try:
             import termios
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _orig_termios)
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _orig_termios)
         except Exception:
             pass
     # Show cursor again and reset color
@@ -89,7 +90,7 @@ def _restore_terminal_mode():
     sys.stdout.flush()
 
 def _check_keypress() -> Optional[str]:
-    """Non-blocking check for keypress."""
+    """Non-blocking check for keypress supporting both Windows and POSIX/Termux."""
     if sys.platform == "win32":
         try:
             import msvcrt
@@ -104,9 +105,12 @@ def _check_keypress() -> Optional[str]:
     else:
         try:
             import select
-            r, _, _ = select.select([sys.stdin], [], [], 0.0)
-            if r:
-                return sys.stdin.read(1)
+            if sys.stdin.isatty():
+                r, _, _ = select.select([sys.stdin.fileno()], [], [], 0.0)
+                if r:
+                    raw = os.read(sys.stdin.fileno(), 16)
+                    if raw:
+                        return raw.decode("utf-8", errors="ignore")
         except Exception:
             pass
     return None
@@ -152,6 +156,11 @@ class AlphaApplication:
         self.running = False
         self.current_session: Optional[Session] = None
         self.recent_events: List[Event] = []
+        self.lock = threading.Lock()
+        self.scan_trigger_event = threading.Event()
+        self.scanner_status_text = "INITIALIZING..."
+        self.last_scan_metadata: Optional[Any] = None
+        self.is_paused = False
 
     def start_session(self) -> Session:
         """Create and persist a new monitoring session."""
@@ -178,6 +187,61 @@ class AlphaApplication:
             self.current_session.contact_count = len(self.tracker.contacts)
             self.db.update_session(self.current_session)
 
+    def _scan_worker_loop(self, sess_id: str) -> None:
+        """Background worker thread executing wireless scans without blocking the UI."""
+        while self.running:
+            if not self.is_paused:
+                self.scanner_status_text = "SCANNING..."
+                try:
+                    batch = self.wifi_backend.scan(sess_id)
+                    self.last_scan_metadata = batch.metadata
+                    
+                    obs_list = list(batch.observations)
+                    if self.ble_backend:
+                        ble_batch = self.ble_backend.scan(sess_id)
+                        obs_list.extend(ble_batch.observations)
+
+                    new_evts = []
+                    with self.lock:
+                        for obs in obs_list:
+                            contact, evts = self.tracker.process_observation(obs, sess_id)
+                            self.classifier.classify(contact)
+                            wl_evts = self.watchlist_engine.evaluate(contact, sess_id)
+                            new_evts.extend(evts)
+                            new_evts.extend(wl_evts)
+
+                        stale_evts = self.tracker.update_temporal_states(sess_id)
+                        new_evts.extend(stale_evts)
+
+                        for ev in new_evts:
+                            self.alert_manager.dispatch(ev)
+
+                        self.db.insert_observations(obs_list)
+                        self.db.save_contacts(self.tracker.get_all_contacts())
+                        self.db.insert_events(new_evts)
+
+                        self.current_session.observation_count += len(obs_list)
+                        self.current_session.event_count += len(new_evts)
+                        self.current_session.contact_count = len(self.tracker.contacts)
+                        self.db.update_session(self.current_session)
+
+                        self.recent_events = new_evts + self.recent_events
+                        self.recent_events = self.recent_events[:150]
+
+                    if len(obs_list) > 0:
+                        self.scanner_status_text = f"LIVE ({len(obs_list)} APs)"
+                    else:
+                        self.scanner_status_text = "0 APs (Check Location)"
+                except Exception as ex:
+                    self.scanner_status_text = f"ERR: {str(ex)[:20]}"
+                    self.logger.error(f"Scanner worker error: {ex}")
+            else:
+                self.scanner_status_text = "PAUSED"
+
+            # Sleep interval or wait for immediate scan trigger
+            self.scan_trigger_event.wait(timeout=self.config.scan_interval_seconds)
+            self.scan_trigger_event.clear()
+
     def run_single_scan(self) -> List[Observation]:
         """Perform one scan pass and update tracker and classification."""
         sess_id = self.current_session.session_id if self.current_session else "single_scan"
@@ -190,37 +254,38 @@ class AlphaApplication:
 
         # Process observations through pipeline
         new_events = []
-        for obs in all_obs:
-            contact, evts = self.tracker.process_observation(obs, sess_id)
-            self.classifier.classify(contact)
-            wl_evts = self.watchlist_engine.evaluate(contact, sess_id)
-            new_events.extend(evts)
-            new_events.extend(wl_evts)
+        with self.lock:
+            for obs in all_obs:
+                contact, evts = self.tracker.process_observation(obs, sess_id)
+                self.classifier.classify(contact)
+                wl_evts = self.watchlist_engine.evaluate(contact, sess_id)
+                new_events.extend(evts)
+                new_events.extend(wl_evts)
 
-        # Check temporal stale transitions
-        stale_evts = self.tracker.update_temporal_states(sess_id)
-        new_events.extend(stale_evts)
+            # Check temporal stale transitions
+            stale_evts = self.tracker.update_temporal_states(sess_id)
+            new_events.extend(stale_evts)
 
-        # Dispatch alerts
-        for ev in new_events:
-            self.alert_manager.dispatch(ev)
+            # Dispatch alerts
+            for ev in new_events:
+                self.alert_manager.dispatch(ev)
 
-        # Persist to SQLite
-        if self.current_session:
-            self.db.insert_observations(all_obs)
-            self.db.save_contacts(self.tracker.get_all_contacts())
-            self.db.insert_events(new_events)
-            self.current_session.observation_count += len(all_obs)
-            self.current_session.event_count += len(new_events)
-            self.current_session.contact_count = len(self.tracker.contacts)
-            self.db.update_session(self.current_session)
+            # Persist to SQLite
+            if self.current_session:
+                self.db.insert_observations(all_obs)
+                self.db.save_contacts(self.tracker.get_all_contacts())
+                self.db.insert_events(new_events)
+                self.current_session.observation_count += len(all_obs)
+                self.current_session.event_count += len(new_events)
+                self.current_session.contact_count = len(self.tracker.contacts)
+                self.db.update_session(self.current_session)
 
-        self.recent_events = new_events + self.recent_events
-        self.recent_events = self.recent_events[:150]
+            self.recent_events = new_events + self.recent_events
+            self.recent_events = self.recent_events[:150]
         return all_obs
 
     def run_interactive_monitor(self) -> None:
-        """Launch full interactive Terminal Dashboard monitoring loop."""
+        """Launch full interactive Terminal Dashboard monitoring loop with background scanning."""
         from alpha.tui.engine import TerminalUI
         
         self.start_session()
@@ -230,6 +295,7 @@ class AlphaApplication:
         # Register signal handlers for clean shutdown
         def handle_signal(sig, frame):
             self.running = False
+            self.scan_trigger_event.set()
         signal.signal(signal.SIGINT, handle_signal)
         signal.signal(signal.SIGTERM, handle_signal)
 
@@ -238,86 +304,62 @@ class AlphaApplication:
         sys.stdout.write("\033[?25l\033[2J")  # Hide cursor, clear screen
         sys.stdout.flush()
 
-        last_scan_time = 0.0
-        last_meta = None
+        # Start background scanner thread
+        scan_thread = threading.Thread(
+            target=self._scan_worker_loop,
+            args=(self.current_session.session_id,),
+            daemon=True
+        )
+        scan_thread.start()
 
         try:
             while self.running:
-                now = time.time()
-                
-                # Check for keyboard input
+                # 1. Non-blocking keypress handling with immediate response
                 key = _check_keypress()
                 if key:
-                    if key.lower() == "q":
+                    if key.lower() == "q" or key == "\x03":
                         self.running = False
                         break
                     elif key in ("1", "2", "3", "4", "5", "6"):
                         ui.active_tab = int(key)
-                    elif key == "\t":
+                    elif key == "\t" or key.endswith("[C"):  # Tab or Right Arrow
                         ui.active_tab = (ui.active_tab % 6) + 1
+                    elif key.endswith("[D"):  # Left Arrow
+                        ui.active_tab = 6 if ui.active_tab == 1 else ui.active_tab - 1
                     elif key.lower() == "p":
-                        ui.is_paused = not ui.is_paused
+                        self.is_paused = not self.is_paused
+                        ui.is_paused = self.is_paused
                     elif key.lower() == "c":
-                        # Cycle profile
                         profiles = ["BALANCED", "ACTIVE", "LOW_POWER"]
                         curr_idx = profiles.index(self.config.power_profile) if self.config.power_profile in profiles else 0
                         next_p = profiles[(curr_idx + 1) % len(profiles)]
                         self.config.apply_power_profile(next_p)
                     elif key.lower() == "r":
-                        last_scan_time = 0.0  # Force scan
+                        self.scan_trigger_event.set()
 
-                # Perform scan pass if not paused and interval elapsed
-                if not ui.is_paused and (now - last_scan_time) >= self.config.scan_interval_seconds:
-                    sess_id = self.current_session.session_id
-                    batch = self.wifi_backend.scan(sess_id)
-                    last_meta = batch.metadata
-                    
-                    obs_list = list(batch.observations)
-                    if self.ble_backend:
-                        ble_batch = self.ble_backend.scan(sess_id)
-                        obs_list.extend(ble_batch.observations)
+                # 2. Extract snapshot of current state
+                with self.lock:
+                    contacts = self.tracker.get_all_contacts()
+                    events = list(self.recent_events)
+                    meta = self.last_scan_metadata
+                    status_text = self.scanner_status_text
 
-                    new_evts = []
-                    for obs in obs_list:
-                        contact, evts = self.tracker.process_observation(obs, sess_id)
-                        self.classifier.classify(contact)
-                        wl_evts = self.watchlist_engine.evaluate(contact, sess_id)
-                        new_evts.extend(evts)
-                        new_evts.extend(wl_evts)
-
-                    stale_evts = self.tracker.update_temporal_states(sess_id)
-                    new_evts.extend(stale_evts)
-
-                    for ev in new_evts:
-                        self.alert_manager.dispatch(ev)
-
-                    self.db.insert_observations(obs_list)
-                    self.db.save_contacts(self.tracker.get_all_contacts())
-                    self.db.insert_events(new_evts)
-
-                    self.current_session.observation_count += len(obs_list)
-                    self.current_session.event_count += len(new_evts)
-                    self.current_session.contact_count = len(self.tracker.contacts)
-                    self.db.update_session(self.current_session)
-
-                    self.recent_events = new_evts + self.recent_events
-                    self.recent_events = self.recent_events[:150]
-                    last_scan_time = now
-
-                # Render UI frame
-                contacts = self.tracker.get_all_contacts()
+                # 3. Render UI frame at smooth refresh rate
                 screen = ui.render_full_screen(
                     contacts=contacts,
-                    events=self.recent_events,
-                    last_metadata=last_meta
+                    events=events,
+                    last_metadata=meta,
+                    scanner_status=status_text
                 )
                 sys.stdout.write(screen)
                 sys.stdout.flush()
 
-                # Sleep brief interval according to ui refresh rate
-                time.sleep(1.0 / max(1, self.config.ui_refresh_hz))
+                # 4. Smooth 6.6 FPS UI loop (150ms sleep)
+                time.sleep(0.15)
 
         finally:
+            self.running = False
+            self.scan_trigger_event.set()
             _restore_terminal_mode()
             self.end_session()
             print(f"\n[ALPHA] Session {self.current_session.session_id} completed successfully.")
@@ -485,12 +527,20 @@ def main() -> int:
         else:
             contacts = app.tracker.get_all_contacts()
             print(f"\n[ALPHA SCAN] Observed {len(obs)} item(s) -> {len(contacts)} unique contact(s):")
-            print(f" {'ST':<3} {'TYPE':<4} {'SSID / NAME':<22} {'MAC ADDRESS':<18} {'VENDOR':<18} {'RSSI':<8} {'CH'}")
-            print(" " + "-" * 78)
-            for c in sorted(contacts, key=lambda x: x.last_rssi, reverse=True):
-                name = sanitize_string(c.ssid or c.device_name or "[Hidden/None]", max_length=20)
-                mfg = sanitize_string(c.manufacturer, max_length=16)
-                print(f" {c.state.value[:2]:<3} {c.signal_type.value[:3]:<4} {name:<22} {c.mac_address:<18} {mfg:<18} {c.last_rssi:>4}dBm {str(c.channel or '-'):>3}")
+            if len(obs) == 0:
+                print("\n  \033[1;33m[!] Android returned 0 Wi-Fi networks.\033[0m")
+                print("  Android/Termux scanning requirements:")
+                print("  1. \033[1;36mLocation Services toggle\033[0m must be turned ON in Android Quick Settings.")
+                print("  2. \033[1;36mTermux:API app\033[0m must be installed from F-Droid and granted Location permission.")
+                print("  3. \033[1;36mWi-Fi\033[0m must be enabled.")
+                print("\n  \033[1;32mTip:\033[0m You can test the platform right now using: \033[1;37malpha scan --mock\033[0m")
+            else:
+                print(f" {'ST':<3} {'TYPE':<4} {'SSID / NAME':<22} {'MAC ADDRESS':<18} {'VENDOR':<18} {'RSSI':<8} {'CH'}")
+                print(" " + "-" * 78)
+                for c in sorted(contacts, key=lambda x: x.last_rssi, reverse=True):
+                    name = sanitize_string(c.ssid or c.device_name or "[Hidden/None]", max_length=20)
+                    mfg = sanitize_string(c.manufacturer, max_length=16)
+                    print(f" {c.state.value[:2]:<3} {c.signal_type.value[:3]:<4} {name:<22} {c.mac_address:<18} {mfg:<18} {c.last_rssi:>4}dBm {str(c.channel or '-'):>3}")
         return 0
 
     elif args.subcommand == "devices":

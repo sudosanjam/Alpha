@@ -74,13 +74,17 @@ class TerminalUI:
             return clean[:max(0, width - 3)] + "..."
         return line
 
-    def render_header(self, width: int) -> List[str]:
+    def render_header(self, width: int, scanner_status: str = "IDLE") -> List[str]:
         """Render universal application header and tab bar."""
         app_title = "ALPHA WIRELESS OBSERVATION"
         mock_tag = " [MOCK DATA]" if self.session.is_mock else " [ROOTLESS]"
         profile_tag = f" [{self.config.power_profile}]"
         
-        status_tag = " [PAUSED]" if self.is_paused else " [LIVE]"
+        # Pulsing heartbeat indicator
+        pulse = "●" if (int(time.time() * 2) % 2 == 0) else "○"
+        if self.ascii_only:
+            pulse = "*" if (int(time.time() * 2) % 2 == 0) else "."
+        status_tag = " [PAUSED]" if self.is_paused else f" [{pulse} LIVE]"
         
         header_text = f" {app_title}{mock_tag}{profile_tag}{status_tag}"
         dur = int(time.time() - self.session.started_at)
@@ -105,9 +109,9 @@ class TerminalUI:
             else:
                 tab_str += self._color("36", f"  {title}  ") + " "
 
-        filter_str = f"Filter: '{self.search_filter}' " if self.search_filter else ""
-        pad_tab = max(0, width - visible_length(tab_str) - len(filter_str))
-        tab_bar = tab_str + (" " * pad_tab) + self._color("33", filter_str)
+        scan_info = f"[{scanner_status}]"
+        pad_tab = max(0, width - visible_length(tab_str) - len(scan_info) - 1)
+        tab_bar = tab_str + (" " * pad_tab) + self._color("33", scan_info)
 
         sep = "-" * width if self.ascii_only else "─" * width
         return [top_bar, tab_bar, self._color("90", sep)]
@@ -115,9 +119,9 @@ class TerminalUI:
     def render_footer(self, width: int) -> List[str]:
         """Render bottom action hotkey legend."""
         sep = "-" * width if self.ascii_only else "─" * width
-        shortcuts = "[Tab/1-6] Tabs  [/] Filter  [p] Pause  [c] Profile  [r] Scan  [q] Quit"
+        shortcuts = "[Tab/1-6] Tabs  [r] Scan Now  [p] Pause  [c] Profile  [q] Quit"
         if width < 65:
-            shortcuts = "[1-6] Tabs [/] Filter [p] Pause [q] Quit"
+            shortcuts = "[1-6] Tabs [r] Scan [p] Pause [q] Quit"
         footer_line = self._color("90", shortcuts)
         return [self._color("90", sep), footer_line]
 
@@ -145,6 +149,20 @@ class TerminalUI:
 
         lines.append("")
 
+        # Display Help & Onboarding Banner if 0 contacts observed
+        if total == 0:
+            border = "-" * min(width - 2, 68) if self.ascii_only else "─" * min(width - 2, 68)
+            lines.append(self._color("1;33", f" +{border}+"))
+            lines.append(self._color("1;33", f" |  [!] WAITING FOR WIRELESS SCAN RESULTS"))
+            lines.append(self._color("37",   f" |  If running in Termux on Android:"))
+            lines.append(self._color("36",   f" |  1. Enable Android System Location (GPS) in Quick Settings"))
+            lines.append(self._color("36",   f" |  2. Grant Location permission to 'Termux:API' app"))
+            lines.append(self._color("36",   f" |  3. Ensure Wi-Fi is turned ON in Android Settings"))
+            lines.append(self._color("32",   f" |  Press [r] to force an immediate scan pass now"))
+            lines.append(self._color("32",   f" |  (Tip: Run 'alpha --mock' to test with simulated networks)"))
+            lines.append(self._color("1;33", f" +{border}+"))
+            lines.append("")
+
         # Wi-Fi Channel Occupancy Bar
         if summary["channel_distribution"]:
             lines.append(self._color("1;36", "--- Wi-Fi Channel Occupancy ---"))
@@ -161,6 +179,8 @@ class TerminalUI:
             fresh_color = "92" if meta.freshness == FreshnessState.LIVE else ("33" if meta.freshness == FreshnessState.CACHED else "91")
             fresh_label = self._color(fresh_color, meta.freshness.value)
             lines.append(f"Scanner Health: {fresh_label} (Scan Duration: {meta.duration_ms:.1f}ms | Age: {meta.age_seconds:.1f}s)")
+            if meta.error_message:
+                lines.append(self._color("33", f"Notice: {meta.error_message}"))
             lines.append("")
 
         # Recent Events Stream
@@ -279,7 +299,8 @@ class TerminalUI:
         contacts: List[Contact],
         events: List[Event],
         observations: Optional[List[Observation]] = None,
-        last_metadata: Optional[Any] = None
+        last_metadata: Optional[Any] = None,
+        scanner_status: str = "IDLE"
     ) -> str:
         """Assemble and render the full interactive terminal screen."""
         self.last_scan_metadata = last_metadata
@@ -287,7 +308,7 @@ class TerminalUI:
         width = max(40, term_size.columns)
         height = max(15, term_size.lines)
 
-        header_lines = self.render_header(width)
+        header_lines = self.render_header(width, scanner_status=scanner_status)
         footer_lines = self.render_footer(width)
         content_lines_allowed = max(5, height - len(header_lines) - len(footer_lines))
 
