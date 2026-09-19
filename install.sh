@@ -50,9 +50,15 @@ if [ $IS_TERMUX -eq 1 ]; then
 fi
 
 # 4. Install Python Dependencies & Package
-echo "[*] Installing Alpha package dependencies..."
-$PYTHON_BIN -m pip install --upgrade pip
-$PYTHON_BIN -m pip install -e .
+echo "[*] Installing Alpha package..."
+# Do not upgrade pip (Termux forbids self-upgrading pip as it is managed by pkg)
+if $PYTHON_BIN -m pip --version &> /dev/null; then
+    if $PYTHON_BIN -m pip install --help 2>&1 | grep -q "break-system-packages"; then
+        $PYTHON_BIN -m pip install --break-system-packages -e . 2>/dev/null || true
+    else
+        $PYTHON_BIN -m pip install -e . 2>/dev/null || true
+    fi
+fi
 
 # 5. Create Configuration & Data Directories
 CONFIG_DIR="${ALPHA_CONFIG_DIR:-$HOME/.config/alpha}"
@@ -65,16 +71,28 @@ echo "[+] Initialized storage directories:"
 echo "    Config: $CONFIG_DIR"
 echo "    Data:   $DATA_DIR"
 
-# 6. Ensure Symlink / Binary in PATH
-BIN_DIR="$PREFIX/bin"
-if [ ! -d "$BIN_DIR" ]; then
+# 6. Ensure Standalone 'alpha' Command in PATH
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DIR=""
+
+if [ -n "$PREFIX" ] && [ -d "$PREFIX/bin" ] && [ -w "$PREFIX/bin" ]; then
+    BIN_DIR="$PREFIX/bin"
+elif [ -d "$HOME/.local/bin" ]; then
+    BIN_DIR="$HOME/.local/bin"
+elif [ -d "$HOME/bin" ]; then
+    BIN_DIR="$HOME/bin"
+else
     BIN_DIR="$HOME/.local/bin"
     mkdir -p "$BIN_DIR"
 fi
 
-if [ -w "$BIN_DIR" ]; then
-    ln -sf "$(command -v alpha || echo "$BIN_DIR/alpha")" "$BIN_DIR/alpha" 2>/dev/null || true
-fi
+cat <<EOF > "$BIN_DIR/alpha"
+#!/usr/bin/env bash
+export PYTHONPATH="$REPO_DIR:\$PYTHONPATH"
+exec "$PYTHON_BIN" -m alpha.cli "\$@"
+EOF
+chmod +x "$BIN_DIR/alpha"
+echo "[+] Created Alpha launcher: $BIN_DIR/alpha"
 
 # 7. Run Automated Self-Test Verification
 echo ""
