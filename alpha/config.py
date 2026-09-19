@@ -34,6 +34,7 @@ class AlphaConfig:
     power_profile: str = "BALANCED"  # LOW_POWER, BALANCED, ACTIVE
     scan_interval_seconds: float = 5.0
     scan_timeout_seconds: float = 8.0
+    enable_mock_ble: bool = False  # Enable hybrid BLE simulation alongside live Wi-Fi
     
     # Temporal Correlation Windows (Seconds)
     new_window_seconds: float = 20.0

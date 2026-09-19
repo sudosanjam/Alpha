@@ -146,12 +146,16 @@ class AlphaApplication:
         )
 
         # Initialize backends
+        enable_hybrid_ble = getattr(config, "enable_mock_ble", False)
         if self.is_mock:
             self.wifi_backend = MockAcquisitionBackend(scenario=self.scenario)
             self.ble_backend = None
         else:
             self.wifi_backend = TermuxWifiBackend(command_timeout=config.scan_timeout_seconds)
-            self.ble_backend = TermuxBleBackend()
+            self.ble_backend = TermuxBleBackend(
+                command_timeout=config.scan_timeout_seconds,
+                enable_hybrid_fallback=enable_hybrid_ble
+            )
 
         self.running = False
         self.current_session: Optional[Session] = None
@@ -370,6 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Construct CLI argument parser with all subcommands and shared flags."""
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--mock", action="store_true", help="Run in mock mode with simulated observations")
+    common.add_argument("--mock-ble", "--hybrid-ble", dest="mock_ble", action="store_true", help="Enable hybrid simulated BLE devices alongside live Wi-Fi")
     common.add_argument("--scenario", default="normal", choices=["normal", "busy", "changing", "sparse", "unknown"], help="Mock scenario to execute")
     common.add_argument("--ascii", action="store_true", help="Force ASCII-only rendering without box drawing characters")
     common.add_argument("--profile", choices=["LOW_POWER", "BALANCED", "ACTIVE"], help="Set power profile")
@@ -465,6 +470,8 @@ def main() -> int:
         config.ascii_only = True
     if args.profile:
         config.apply_power_profile(args.profile)
+    if getattr(args, "mock_ble", False):
+        config.enable_mock_ble = True
 
     # 1. Handle Self-Test
     if args.self_test:
@@ -526,14 +533,17 @@ def main() -> int:
             print(json.dumps([o.to_dict() for o in obs], indent=2))
         else:
             contacts = app.tracker.get_all_contacts()
-            print(f"\n[ALPHA SCAN] Observed {len(obs)} item(s) -> {len(contacts)} unique contact(s):")
+            wifi_obs = [o for o in obs if o.signal_type == SignalType.WIFI]
+            ble_obs = [o for o in obs if o.signal_type == SignalType.BLE]
+            print(f"\n[ALPHA SCAN] Observed {len(obs)} item(s) (Wi-Fi: {len(wifi_obs)} | BLE: {len(ble_obs)}) -> {len(contacts)} unique contact(s):")
             if len(obs) == 0:
-                print("\n  \033[1;33m[!] Android returned 0 Wi-Fi networks.\033[0m")
-                print("  Android/Termux scanning requirements:")
-                print("  1. \033[1;36mLocation Services toggle\033[0m must be turned ON in Android Quick Settings.")
+                print("\n  \033[1;33m[!] 0 wireless devices discovered.\033[0m")
+                print("  Android / Termux Discovery Checklist:")
+                print("  1. \033[1;36mLocation Services (GPS)\033[0m must be turned ON in Android Quick Settings.")
                 print("  2. \033[1;36mTermux:API app\033[0m must be installed from F-Droid and granted Location permission.")
-                print("  3. \033[1;36mWi-Fi\033[0m must be enabled.")
-                print("\n  \033[1;32mTip:\033[0m You can test the platform right now using: \033[1;37malpha scan --mock\033[0m")
+                print("  3. \033[1;36mWi-Fi / Bluetooth\033[0m toggles must be enabled.")
+                print("  4. \033[1;32mBLE on Stock Android:\033[0m Run with \033[1;37malpha scan --mock-ble\033[0m to enable hybrid BLE emulation alongside live Wi-Fi.")
+                print("\n  \033[1;32mTip:\033[0m Run \033[1;37malpha scan --mock\033[0m for a full synthetic wireless environment.")
             else:
                 print(f" {'ST':<3} {'TYPE':<4} {'SSID / NAME':<22} {'MAC ADDRESS':<18} {'VENDOR':<18} {'RSSI':<8} {'CH'}")
                 print(" " + "-" * 78)

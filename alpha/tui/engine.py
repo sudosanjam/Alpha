@@ -114,16 +114,23 @@ class TerminalUI:
         tab_bar = tab_str + (" " * pad_tab) + self._color("33", scan_info)
 
         sep = "-" * width if self.ascii_only else "─" * width
-        return [top_bar, tab_bar, self._color("90", sep)]
+        return [top_bar, tab_bar, self._color("1;34", sep)]
 
     def render_footer(self, width: int) -> List[str]:
-        """Render bottom action hotkey legend."""
+        """Render bottom action hotkey legend with high-contrast Blue/White styling."""
         sep = "-" * width if self.ascii_only else "─" * width
-        shortcuts = "[Tab/1-6] Tabs  [r] Scan Now  [p] Pause  [c] Profile  [q] Quit"
-        if width < 65:
-            shortcuts = "[1-6] Tabs [r] Scan [p] Pause [q] Quit"
-        footer_line = self._color("90", shortcuts)
-        return [self._color("90", sep), footer_line]
+        if width >= 85:
+            shortcuts = " ⌨ [Tab/1-6] Tabs  │  [r] Scan Now  │  [p] Pause/Resume  │  [c] Power Profile  │  [q] Quit "
+        elif width >= 65:
+            shortcuts = " ⌨ [1-6] Tabs  │  [r] Scan  │  [p] Pause  │  [c] Profile  │  [q] Quit "
+        else:
+            shortcuts = " [1-6]Tabs [r]Scan [p]Pause [c]Prof [q]Quit "
+
+        # High-contrast Bold White on Blue banner spanning full terminal width
+        bar_padded = shortcuts.ljust(width)
+        footer_bar = self._color("1;37;44", bar_padded)
+        sep_line = self._color("1;34", sep)
+        return [sep_line, footer_bar]
 
     def render_dashboard(self, contacts: List[Contact], events: List[Event], width: int, max_lines: int) -> List[str]:
         """Render Dashboard View (Compact, Standard, or Wide)."""
@@ -140,27 +147,26 @@ class TerminalUI:
 
         if width >= 75:
             card1 = f"Total: {self._color('1;37', str(total))} (Wi-Fi: {wifi_c} | BLE: {ble_c})"
-            card2 = f"Active: {self._color('93', str(active))} | New: {self._color('92', str(new_c))} | Stale: {self._color('90', str(stale_c))}"
+            card2 = f"Active: {self._color('93', str(active))} | New: {self._color('92', str(new_c))} | Stale: {self._color('37', str(stale_c))}"
             card3 = f"Mean RSSI: {summary['mean_rssi']} dBm"
-            lines.append(f" {card1}  |  {card2}  |  {card3}")
+            lines.append(f" {card1}  │  {card2}  │  {card3}")
         else:
-            lines.append(f" Total: {total} (Wi-Fi:{wifi_c} BLE:{ble_c}) | Active:{active} New:{new_c} Stale:{stale_c}")
-            lines.append(f" Mean RSSI: {summary['mean_rssi']} dBm | Events: {len(events)}")
+            lines.append(f" Total: {total} (Wi-Fi:{wifi_c} BLE:{ble_c}) │ Active:{active} New:{new_c} Stale:{stale_c}")
+            lines.append(f" Mean RSSI: {summary['mean_rssi']} dBm │ Events: {len(events)}")
 
         lines.append("")
 
         # Display Help & Onboarding Banner if 0 contacts observed
         if total == 0:
-            border = "-" * min(width - 2, 68) if self.ascii_only else "─" * min(width - 2, 68)
-            lines.append(self._color("1;33", f" +{border}+"))
-            lines.append(self._color("1;33", f" |  [!] WAITING FOR WIRELESS SCAN RESULTS"))
-            lines.append(self._color("37",   f" |  If running in Termux on Android:"))
-            lines.append(self._color("36",   f" |  1. Enable Android System Location (GPS) in Quick Settings"))
-            lines.append(self._color("36",   f" |  2. Grant Location permission to 'Termux:API' app"))
-            lines.append(self._color("36",   f" |  3. Ensure Wi-Fi is turned ON in Android Settings"))
-            lines.append(self._color("32",   f" |  Press [r] to force an immediate scan pass now"))
-            lines.append(self._color("32",   f" |  (Tip: Run 'alpha --mock' to test with simulated networks)"))
-            lines.append(self._color("1;33", f" +{border}+"))
+            border = "-" * min(width - 2, 70) if self.ascii_only else "─" * min(width - 2, 70)
+            lines.append(self._color("1;33", f" ┌{border}┐"))
+            lines.append(self._color("1;33", f" │  [!] WAITING FOR WIRELESS SCAN RESULTS"))
+            lines.append(self._color("1;37", f" │  Android / Termux Discovery Checklist:"))
+            lines.append(self._color("36",   f" │  1. Wi-Fi: Turn ON Android Location (GPS) & Grant Termux:API Location"))
+            lines.append(self._color("36",   f" │  2. BLE: Enable Bluetooth & Pair devices, or run with '--mock-ble'"))
+            lines.append(self._color("32",   f" │  3. Press [r] to force an immediate scan pass now"))
+            lines.append(self._color("32",   f" │  (Tip: Run 'alpha --mock' or 'alpha --mock-ble' for hybrid testing)"))
+            lines.append(self._color("1;33", f" └{border}┘"))
             lines.append("")
 
         # Wi-Fi Channel Occupancy Bar
@@ -178,7 +184,7 @@ class TerminalUI:
             meta = self.last_scan_metadata
             fresh_color = "92" if meta.freshness == FreshnessState.LIVE else ("33" if meta.freshness == FreshnessState.CACHED else "91")
             fresh_label = self._color(fresh_color, meta.freshness.value)
-            lines.append(f"Scanner Health: {fresh_label} (Scan Duration: {meta.duration_ms:.1f}ms | Age: {meta.age_seconds:.1f}s)")
+            lines.append(f"Scanner Health: {fresh_label} (Duration: {meta.duration_ms:.1f}ms | Age: {meta.age_seconds:.1f}s)")
             if meta.error_message:
                 lines.append(self._color("33", f"Notice: {meta.error_message}"))
             lines.append("")
@@ -215,22 +221,22 @@ class TerminalUI:
         if width >= 90:
             hdr = f" {'ST':<3} {'TYP':<4} {'SSID / DEVICE NAME':<22} {'MAC ADDRESS':<18} {'MANUFACTURER':<18} {'RSSI':<8} {'CH':<4} {'SECURITY'}"
             lines.append(self._color("1;36", hdr))
-            lines.append(self._color("90", "-" * width if self.ascii_only else "─" * width))
+            lines.append(self._color("1;34", "-" * width if self.ascii_only else "─" * width))
             for c in filtered[:max_lines - 4]:
                 name = sanitize_string(c.ssid or c.device_name or "[None]", max_length=20)
                 mfg = sanitize_string(c.manufacturer, max_length=16)
-                st_color = "92" if c.state == ContactState.NEW else ("93" if c.state == ContactState.ACTIVE else "90")
+                st_color = "92" if c.state == ContactState.NEW else ("93" if c.state == ContactState.ACTIVE else "37")
                 row = f" {self._color(st_color, c.state.value[:2]):<3} {c.signal_type.value[:3]:<4} {name:<22} {c.mac_address:<18} {mfg:<18} {c.last_rssi:>4}dBm {str(c.channel or '-'):>3}  {c.security}"
                 lines.append(row)
         else:
             # Compact view for phone screen
             hdr = f" {'ST':<2} {'SSID/NAME':<16} {'MAC':<17} {'RSSI':<7} {'VENDOR'}"
             lines.append(self._color("1;36", hdr))
-            lines.append(self._color("90", "-" * width if self.ascii_only else "─" * width))
+            lines.append(self._color("1;34", "-" * width if self.ascii_only else "─" * width))
             for c in filtered[:max_lines - 4]:
                 name = sanitize_string(c.ssid or c.device_name or "[None]", max_length=15)
                 mfg = sanitize_string(c.manufacturer, max_length=10)
-                st_color = "92" if c.state == ContactState.NEW else ("93" if c.state == ContactState.ACTIVE else "90")
+                st_color = "92" if c.state == ContactState.NEW else ("93" if c.state == ContactState.ACTIVE else "37")
                 row = f" {self._color(st_color, c.state.value[0]):<2} {name:<16} {c.mac_address:<17} {c.last_rssi:>4}dB {mfg}"
                 lines.append(row)
 
@@ -285,7 +291,7 @@ class TerminalUI:
             lines.append(f"  {ev.message}")
             if ev.evidence:
                 ev_desc = " | ".join(ev.evidence[:2])
-                lines.append(self._color("90", f"  Evidence: {ev_desc}"))
+                lines.append(self._color("36", f"  Evidence: {ev_desc}"))
             lines.append("")
         return lines
 

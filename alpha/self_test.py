@@ -44,6 +44,9 @@ from alpha.radar.radar import TerminalRadar
 from alpha.export.exporter import AlphaExporter
 
 
+from alpha.acquisition.ble import TermuxBleBackend
+
+
 class SelfTestRunner:
     """Executes automated verification tests across all Alpha subsystems."""
 
@@ -61,6 +64,7 @@ class SelfTestRunner:
         self.test_wifi_parsers()
         self.test_storage()
         self.test_mock_acquisition()
+        self.test_ble_acquisition()
         self.test_correlation_tracker()
         self.test_classification_and_signatures()
         self.test_baseline_engine()
@@ -71,6 +75,33 @@ class SelfTestRunner:
 
         all_passed = all(passed for _, passed, _ in self.results)
         return all_passed
+
+    def test_ble_acquisition(self) -> None:
+        try:
+            # Test hybrid fallback mode
+            backend = TermuxBleBackend(enable_hybrid_fallback=True)
+            batch = backend.scan("test_ble_sess")
+            assert batch.metadata.success is True
+            assert len(batch.observations) > 0
+            assert any(o.signal_type == SignalType.BLE for o in batch.observations)
+            assert any(o.device_name and "Apple Watch" in o.device_name for o in batch.observations)
+
+            # Test dumpsys parsing directly
+            sample_dump = """
+            Bonded devices:
+              AA:BB:CC:DD:EE:FF (Pixel Buds Pro) [LE]
+              11:22:33:44:55:66 (Sony WH-1000XM4) [BR/EDR]
+            Connected devices:
+              AA:BB:CC:DD:EE:FF (Pixel Buds Pro)
+            """
+            parsed = backend._parse_dumpsys_output(sample_dump, "sess1")
+            assert len(parsed) == 2
+            assert any(p.identifier == "AA:BB:CC:DD:EE:FF" for p in parsed)
+            assert any(p.device_name == "Pixel Buds Pro" for p in parsed)
+
+            self._record("BLE & Bluetooth Acquisition Subsystem", True)
+        except Exception as ex:
+            self._record("BLE & Bluetooth Acquisition Subsystem", False, str(ex))
 
     def test_sanitizer(self) -> None:
         try:

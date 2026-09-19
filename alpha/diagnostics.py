@@ -141,7 +141,14 @@ class EnvironmentInspector:
 
         # Check BLE helpers
         ble_found = False
-        for helper in ["termux-ble-scan", "termux-bluetooth-scaninfo", "bleak-scan-helper"]:
+        for helper in [
+            "termux-ble-scan",
+            "termux-bluetooth-scaninfo",
+            "termux-bluetooth-devices",
+            "dumpsys",
+            "bluetoothctl",
+            "hcitool",
+        ]:
             if shutil.which(helper):
                 ble_found = True
                 break
@@ -184,7 +191,7 @@ class EnvironmentInspector:
 
     @classmethod
     def format_diagnostics_report(cls) -> str:
-        """Produce a human-readable diagnostics report."""
+        """Produce a human-readable diagnostics report with high-contrast formatting."""
         plat = cls.inspect_platform()
         term = cls.inspect_terminal()
         stor = cls.inspect_storage()
@@ -194,7 +201,7 @@ class EnvironmentInspector:
         def status_str(val: bool, true_text: str = "AVAILABLE", false_text: str = "UNAVAILABLE") -> str:
             if val:
                 return f"\033[92;1m[{true_text}]\033[0m"
-            return f"\033[90m[{false_text}]\033[0m"
+            return f"\033[33m[{false_text}]\033[0m"
 
         lines = [
             "============================================================",
@@ -220,11 +227,11 @@ class EnvironmentInspector:
             "--- Wireless & Hardware Capabilities ---",
             f"Wi-Fi Scan (Termux):  {status_str(wire['termux_wifi_scaninfo'])}",
             f"Wi-Fi Connection Info:{status_str(wire['termux_wifi_connectioninfo'])}",
-            f"BLE Scanning:         {status_str(wire['ble_scan_available'], 'AVAILABLE', 'NOT EXPOSED IN ROOTLESS TERMUX')}",
+            f"BLE Scanning:         {status_str(wire['ble_scan_available'], 'AVAILABLE', 'NOT EXPOSED (Use --mock-ble)')}",
             f"Vibration Alert:      {status_str(wire['termux_vibrate'])}",
             f"Android Notification: {status_str(wire['termux_notification'])}",
-            f"Wi-Fi Monitor Mode:   \033[90m[NOT EXPOSED / ROOTLESS BOUNDARY]\033[0m",
-            f"Packet Injection:     \033[90m[NOT EXPOSED / ROOTLESS BOUNDARY]\033[0m",
+            f"Wi-Fi Monitor Mode:   \033[37m[NOT EXPOSED / ROOTLESS BOUNDARY]\033[0m",
+            f"Packet Injection:     \033[37m[NOT EXPOSED / ROOTLESS BOUNDARY]\033[0m",
             "============================================================",
         ]
         return "\n".join(lines)
