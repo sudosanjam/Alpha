@@ -4,6 +4,13 @@
 
 ---
 
+<div align="center">
+  <img src="assets/alpha-preview.png" alt="Alpha Rootless Wireless Observation TUI Monitor" width="100%" />
+  <p><em>Alpha rootless wireless observation TUI running in Termux on Android with live contact tracking & RSSI telemetry.</em></p>
+</div>
+
+---
+
 ## 1. Overview
 
 **Alpha** is an open-source, rootless wireless observation and environmental awareness platform built natively for Android/Termux environments. Operating with capability honesty, Alpha uses the legitimate APIs exposed by Android and Termux without requiring root, custom kernels, or modified firmware.
